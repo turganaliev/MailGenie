@@ -1,80 +1,56 @@
-// app/api/auth/webhook/route.ts
-import { NextResponse } from 'next/server'
-import { PrismaClient } from '@prisma/client'
+import { Webhook } from 'svix'
+import { headers } from 'next/headers'
+import { WebhookEvent } from '@clerk/nextjs/server'
 
-const prisma = new PrismaClient()
+export async function POST(req: Request) {
+  const SIGNING_SECRET = process.env.SIGNING_SECRET
 
-// Define the expected user type
-interface ClerkUser {
-  id: string
-  email: string
-  first_name?: string
-  last_name?: string
-  created_at: string
-}
-
-// Only handle POST requests
-export async function POST(request: Request) {
-  try {
-    // Step 1: Parse the incoming request body
-    const { user }: { user: ClerkUser } = await request.json()
-
-    const body = await request.json()  // This parses the body as JSON
-    console.log(body)
-
-    // Step 2: Check if user data exists in the request
-    if (!user) {
-      return NextResponse.json({ error: 'No user data found' }, { status: 400 })
-    }
-
-    const { id, email, first_name, last_name, created_at } = user
-
-    // Step 3: Check if the user exists in the database
-    const existingUser = await prisma.user.findUnique({
-      where: { id },
-    })
-
-    let result
-
-    if (existingUser) {
-      // If the user already exists, update their information
-      result = await prisma.user.update({
-        where: { id },
-        data: {
-          email,
-          firstName: first_name || null,
-          lastName: last_name || null,
-        },
-      })
-    } else {
-      // If the user doesn't exist, create a new user
-      result = await prisma.user.create({
-        data: {
-          id,
-          email,
-          firstName: first_name || null,
-          lastName: last_name || null,
-          createdAt: new Date(created_at),
-        },
-      })
-    }
-
-    // Step 4: Return success response
-    return NextResponse.json({ success: true, user: result })
-  } catch (error) {
-    // Catch and log any errors
-    console.error('Error handling webhook:', error)
-    return NextResponse.json({ error: 'Failed to process request' }, { status: 500 })
-  } finally {
-    // Disconnect from Prisma to avoid any hanging connections
-    await prisma.$disconnect()
+  if (!SIGNING_SECRET) {
+    throw new Error('Error: Please add SIGNING_SECRET from Clerk Dashboard to .env or .env.local')
   }
-}
 
-// For any other HTTP methods (e.g., GET, PUT), return a method not allowed response
-export async function GET() {
-  return NextResponse.json(
-    { error: 'Method Not Allowed' },
-    { status: 405 } // 405 Method Not Allowed
-  )
+  // Create new Svix instance with secret
+  const wh = new Webhook(SIGNING_SECRET)
+
+  // Get headers
+  const headerPayload = await headers()
+  const svix_id = headerPayload.get('svix-id')
+  const svix_timestamp = headerPayload.get('svix-timestamp')
+  const svix_signature = headerPayload.get('svix-signature')
+
+  // If there are no headers, error out
+  if (!svix_id || !svix_timestamp || !svix_signature) {
+    return new Response('Error: Missing Svix headers', {
+      status: 400,
+    })
+  }
+
+  // Get body
+  const payload = await req.json()
+  const body = JSON.stringify(payload)
+
+  let evt: WebhookEvent
+
+  // Verify payload with headers
+  try {
+    evt = wh.verify(body, {
+      'svix-id': svix_id,
+      'svix-timestamp': svix_timestamp,
+      'svix-signature': svix_signature,
+    }) as WebhookEvent
+  } catch (err) {
+    console.error('Error: Could not verify webhook:', err)
+    return new Response('Error: Verification error', {
+      status: 400,
+    })
+  }
+
+  // Do something with payload
+  // For this guide, log payload to console
+  const { id } = evt.data
+  const eventType = evt.type
+  if (evt.type === 'user.created') {
+    console.log('userId:', evt.data.id)
+  }
+  return new Response('Webhook received', { status: 200 })
 }
